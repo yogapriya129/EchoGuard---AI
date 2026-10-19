@@ -27,12 +27,10 @@ IMPORTANT LIMITATIONS
     - This is a prototype, not a secure production system.
     - The delay indicator is experimental and rule-based, not a validated AI
       probability or trained machine-learning prediction.
-    - Demo login and role-specific menus are frontend-only and are not secure authentication.
+    - Student and Teacher accounts use backend-stored password hashes; this local prototype still needs a security review before public deployment.
     - Evidence uploads are not securely stored here; the prototype records a
       filename/status rather than implementing secure document storage.
-    - A separate backend or AI module is not automatically integrated by this
-      frontend file. Notifications and production-grade multi-user storage are
-      also not provided unless separately implemented.
+    - The SQLite backend is integrated. No AI Engineering module is used. Production-grade deployment security and notifications are not included.
     - Use fictional demo records; do not enter sensitive real student data.
 
 This header documents the code's intended scope; it does not claim that planned
@@ -94,9 +92,21 @@ def load_data():
 
 
 def save_data(df):
-    """Persist the complete current request table to SQLite transactionally."""
+    """Persist request data through the backend; student saves preserve other users' records."""
     try:
-        backend.save_requests(df)
+        if st.session_state.get("user_role") == "Student":
+            all_rows = backend.load_requests()
+            owner = st.session_state.get("display_name", "").casefold()
+            # df is the full table in session state. Keep other students' rows once,
+            # then append only this student's rows; appending all of df duplicates IDs.
+            names = df["Student Name"].astype(str).str.strip().str.casefold()
+            own_rows = df[names == owner].copy()
+            all_names = all_rows["Student Name"].astype(str).str.strip().str.casefold()
+            others = all_rows[all_names != owner].copy()
+            combined = pd.concat([others, own_rows], ignore_index=True)
+            backend.save_requests(combined)
+        else:
+            backend.save_requests(df)
     except Exception as exc:
         st.error("Could not save request changes to echoguard.db. Please check the data and try again.")
         st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
@@ -279,55 +289,59 @@ def analyse(row):
             "actions": list(dict.fromkeys(actions))}
 
 
-# ---------------------- DEMO LOGIN (FRONTEND PROTOTYPE) ----------------------
-# Demo credentials only. This is NOT production authentication; credentials are
-# stored in source code and real access control must be enforced by a backend.
-DEMO_USERS = {
-    "student": {"password": "student123", "role": "Student"},
-    "faculty": {"password": "faculty123", "role": "Faculty"},
-    "admin": {"password": "admin123", "role": "Admin"},
-}
-
+# ---------------------- STUDENT / TEACHER LOGIN & SELF-REGISTRATION ----------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user_role" not in st.session_state:
     st.session_state.user_role = ""
 if "username" not in st.session_state:
     st.session_state.username = ""
+if "display_name" not in st.session_state:
+    st.session_state.display_name = ""
 
 if not st.session_state.authenticated:
-    st.markdown("""
-    <style>
-    .login-wrap {max-width:650px; margin:2rem auto; padding:2rem; border:1px solid var(--border-color);
-      border-radius:22px; background:var(--secondary-background-color);}
-    .login-kicker {font-size:.8rem; letter-spacing:.16em; text-transform:uppercase;
-      color:var(--primary-color); font-weight:800;}
-    .login-title {font-size:2.5rem; line-height:1.1; font-weight:850; margin:.5rem 0;}
-    .login-copy {opacity:.78; margin-bottom:1rem;}
-    </style>
-    <div class="login-wrap"><div class="login-kicker">🛡️ EchoGuard AI</div>
-    <div class="login-title">Welcome back.</div>
-    <div class="login-copy">Sign in to continue to your request dashboard.</div></div>
-    """, unsafe_allow_html=True)
-    left, center, right = st.columns([1, 2, 1])
-    with center:
+    st.markdown("## 🛡️ EchoGuard AI")
+    st.markdown("### Student and Teacher Portal")
+    st.write("Create your own account or sign in. Student and Teacher accounts are registered separately.")
+    login_tab, signup_tab = st.tabs(["Login", "Create account"] )
+    with login_tab:
         with st.form("echoguard_login_form"):
-            username_input = st.text_input("Username", placeholder="Enter demo username")
-            password_input = st.text_input("Password", type="password", placeholder="Enter password")
-            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
-        if submitted:
-            user = DEMO_USERS.get(username_input.strip().lower())
-            if user and password_input == user["password"]:
+            login_username = st.text_input("Username", key="login_username")
+            login_password = st.text_input("Password", type="password", key="login_password")
+            login_role = st.selectbox("Sign in as", ["Student", "Teacher"], key="login_role")
+            login_submit = st.form_submit_button("Login", type="primary", use_container_width=True)
+        if login_submit:
+            user = backend.authenticate_user(login_username, login_password)
+            if user and user["role"] == login_role:
                 st.session_state.authenticated = True
-                st.session_state.username = username_input.strip().lower()
+                st.session_state.username = user["username"]
+                st.session_state.display_name = user["display_name"]
                 st.session_state.user_role = user["role"]
                 st.session_state.page_after_login = "Dashboard"
                 st.rerun()
+            elif user:
+                st.error("This account belongs to a different role. Choose the correct account type.")
             else:
-                st.error("Invalid username or password. Please try again.")
-        with st.expander("Demo login credentials"):
-            st.markdown("- **Student:** `student` / `student123`\n- **Faculty:** `faculty` / `faculty123`\n- **Admin:** `admin` / `admin123`")
-        st.caption("Demo credentials are for presentation only. Do not use real passwords or sensitive student data.")
+                st.error("Invalid username or password.")
+    with signup_tab:
+        st.info("Create a Student account to submit and track your own requests, or a Teacher account to review requests.")
+        with st.form("echoguard_signup_form", clear_on_submit=True):
+            new_role = st.selectbox("Create account type", ["Student", "Teacher"], key="signup_role")
+            full_name = st.text_input("Full name", key="signup_full_name")
+            new_username = st.text_input("Choose username", key="signup_username", help="3–32 characters: letters, numbers, dot, underscore or hyphen")
+            new_password = st.text_input("Create password", type="password", key="signup_password", help="At least 8 characters")
+            confirm_password = st.text_input("Confirm password", type="password", key="signup_confirm_password")
+            signup_submit = st.form_submit_button("Create account", type="primary", use_container_width=True)
+        if signup_submit:
+            if new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    created = backend.register_user(new_username, full_name, new_role, new_password)
+                    st.success(f"{created['role']} account created for '{created['username']}'. Go to Login and sign in.")
+                except Exception as exc:
+                    st.error(str(exc))
+    st.caption("Accounts are stored locally in SQLite. Use a unique password; this prototype is not yet production-hardened.")
     st.stop()
 
 # Initialise application data only after the demo login gate.
@@ -453,7 +467,12 @@ elif page == "Add Request":
     with st.form("add_form", clear_on_submit=True):
         a, b = st.columns(2)
         with a:
-            student_name = st.text_input("Student name")
+            if st.session_state.get("user_role") == "Student":
+                student_name = st.text_input(
+                    "Student name", value=st.session_state.get("display_name", ""), disabled=True
+                )
+            else:
+                student_name = st.text_input("Student name")
             type_choice = st.selectbox("Request type", TYPES)
             custom_type = st.text_input("Enter request type") if type_choice == "Other" else ""
             submitted_date = st.date_input("Date request was submitted to college", value=date.today())
@@ -583,7 +602,7 @@ elif page == "Request Tracking":
             if row["Faculty Notes"]:
                 st.markdown("**Faculty notes**")
                 st.write(row["Faculty Notes"])
-            st.info("Request records are stored in the local SQLite database. This demo login is frontend-only; it does not enforce private per-student data access or production-grade security.")
+            st.info("Request records are stored in the local SQLite database. Student views are filtered to the registered display name in this prototype; this is not production-grade access control.")
 
 elif page == "Delay Analysis":
     hero("Analyse a request", "Each request is checked individually. The percentage is an experimental rule-based indicator, not a proven probability.")
@@ -637,7 +656,7 @@ elif page == "Delay Analysis":
 
 elif page == "Faculty Monitoring":
     hero("Faculty monitoring", "A central view for spotting urgent requests and routing them to the appropriate review group.")
-    st.warning("Demo only: role-based menus are provided by the frontend, but this is not production-grade authentication or backend-enforced access control.")
+    st.warning("Teacher monitoring is available to registered Teacher accounts. This remains a local prototype, not a production deployment.")
     df = st.session_state.requests_df
     if df.empty:
         st.info("No requests have been submitted yet.")
@@ -668,7 +687,7 @@ elif page == "Faculty Monitoring":
             st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
             st.write("Evidence must be reviewed manually; the system does not automatically analyse documents or verify authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
-            st.info("To update a request in this prototype, use Manage Requests. Faculty-only permissions must be implemented before deployment.")
+            st.info("Review permissions are prototype-level; validate them thoroughly before real deployment.")
 
 elif page == "Manage Requests":
     hero("Manage requests", "Edit entries, delete test data, or import and export CSV files.")
@@ -829,7 +848,7 @@ Install the required packages with `pip install streamlit pandas`, open a termin
 It keeps request details and evidence status together, routes request categories for monitoring, highlights potential time/delay issues, and prepares follow-up message drafts for a person to review.
 
 ### Important limitations
-The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. Automatic document analysis is not connected. Evidence must be reviewed manually; follow-up drafts are simple text templates, not messages sent automatically. Production deployment requires security review and end-to-end testing.
+The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The teacher view uses local account authentication and role-specific navigation, but still needs a security review. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. Automatic document analysis is not connected. Evidence must be reviewed manually; follow-up drafts are simple text templates, not messages sent automatically. Production deployment requires security review and end-to-end testing.
 
 ### Privacy and demo guidance
 Request data is stored locally in SQLite (`echoguard.db`) and evidence uploads are stored in a local `evidence_uploads` folder. This is not a secure multi-user deployment. Use fictional records for the hackathon demonstration and do not enter sensitive student information.
