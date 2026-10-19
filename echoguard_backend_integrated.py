@@ -25,7 +25,7 @@ COLUMNS = [
     "Evidence Verification", "Routing Group", "Faculty Notes", "College Response Date",
 ]
 DATE_COLUMNS = {"Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"}
-STATUSES = {"Submitted", "Under Review", "Waiting for Information", "In Progress", "Accepted", "Completed", "Rejected"}
+STATUSES = {"Submitted", "Under Review", "Waiting for Information", "In Progress", "Completed", "Rejected"}
 EVIDENCE_STATUSES = {"Evidence Required", "Pending Verification", "AI Review", "Verified", "Verification Issue", "Not Required"}
 
 
