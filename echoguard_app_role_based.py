@@ -44,7 +44,6 @@ from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
 import echoguard_backend_integrated as backend
-import echoguard_ai_engineering as ai_engineering
 
 st.set_page_config(page_title="EchoGuard AI", page_icon="🛡️", layout="wide")
 
@@ -332,7 +331,7 @@ with st.sidebar:
                     label_visibility="collapsed")
     st.divider()
     st.caption("Theme: app menu ⋮ → Settings → Theme.")
-    st.caption("Prototype data is saved locally to a CSV file.")
+    st.caption("Prototype data is saved locally to a SQLite file.")
 
 df = st.session_state.requests_df
 
@@ -454,19 +453,12 @@ elif page == "Add Request":
             st.success(f"Request {new_row['Request ID']} saved successfully.")
 
             if evidence_file:
-                st.markdown("#### Evidence review suggestions")
-                if Path(evidence_file.name).suffix.lower() == ".pdf":
-                    extracted = ai_engineering.extract_text_from_file(evidence_file)
-                    if extracted.startswith("PDF extraction needs PyMuPDF") or extracted.startswith("Could not extract") or extracted.startswith("Unsupported file"):
-                        st.warning(extracted)
-                    else:
-                        report = ai_engineering.analyse_request(
-                            document_text=extracted,
-                            request_type=req_type,
-                            student_name=student_name.strip(),
-                            event_name=activity_name.strip(),
-                            event_date=str(activity_date) if activity_date else "",
-                        )
+                st.markdown("#### Evidence review")
+                st.info(
+                    "Evidence uploaded successfully. "
+                    "Automatic AI analysis is disabled. "
+                    "Faculty must review the original document manually."
+                )
                         st.write("**Suggested category:**", report["suggested_category"], f"(confidence: {report['category_confidence']})")
                         if report["missing_information"]:
                             st.warning("Items to review: " + "; ".join(report["missing_information"]))
@@ -564,29 +556,35 @@ elif page == "Delay Analysis":
             st.write(f"**Expected due:** {show_date(row['Expected Due Date'])}")
             st.write(f"**Assigned to:** {row['Assigned To'] or 'Not assigned'}")
             st.write(f"**Last updated:** {show_date(row['Last Updated'])}")
-        with right:
-            st.markdown("### Why was this flagged?")
-            for reason in result["reasons"]:
-                st.markdown(f"- {reason}")
-            st.markdown("### Recommended action")
-            for action in result["actions"]:
-                st.markdown(f"- {action}")
         with st.expander("Draft a follow-up message"):
             office = str(row["Assigned To"]).strip() or "the responsible office"
-            due_analysis = ai_engineering.analyse_delay(
-                row["Submission Date"], row["Expected Due Date"], row["Status"]
+            student = str(row["Student Name"])
+            request_id = str(row["Request ID"])
+            request_type = str(row["Request Type"])
+            submission_date = show_date(row["Submission Date"])
+            status = str(row["Status"])
+
+            draft = (
+                f"Dear {office},\n\n"
+                f"I am writing to follow up on the request submitted by "
+                f"{student}.\n\n"
+                f"Request ID: {request_id}\n"
+                f"Request Type: {request_type}\n"
+                f"Submission Date: {submission_date}\n"
+                f"Current Status: {status}\n\n"
+                f"Could you please provide an update on this request?\n\n"
+                f"Thank you."
             )
-            draft = ai_engineering.draft_follow_up(
-                student_name=str(row["Student Name"]),
-                request_id=str(row["Request ID"]),
-                request_type=str(row["Request Type"]),
-                submission_date=show_date(row["Submission Date"]),
-                status=str(row["Status"]),
-                days_overdue=due_analysis.get("days_overdue"),
-                faculty_name=office,
+
+            st.text_area(
+                "Review this message before sending",
+                value=draft,
+                height=220,
             )
-            st.text_area("Review this message before sending", value=draft, height=220)
-            st.caption("This is a template-generated draft. It is not sent automatically.")
+            st.caption(
+                "This is a template-generated draft. "
+                "It is not sent automatically."
+            )
 
 elif page == "Faculty Monitoring":
     hero("Faculty monitoring", "A central view for spotting urgent requests and routing them to the appropriate review group.")
@@ -620,8 +618,16 @@ elif page == "Faculty Monitoring":
             st.write(f"**Priority reason:** {row['Priority reason']}")
             st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
-            st.write("PDF text checks and follow-up draft generation are connected to the EchoGuard AI engineering module. These checks are rule-based suggestions, not proof of authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
-            st.info("To update a request in this prototype, use Manage Requests. Faculty-only permissions must be implemented before deployment.")
+            st.write(
+                "Evidence review is manual. These rule-based suggestions are not "
+                "proof of authenticity. Secure faculty authentication, a private "
+                "evidence viewer, and automatic notifications are not implemented. "
+                "Faculty must make the final decision."
+            )
+            st.info(
+                "To update a request in this prototype, use Manage Requests. "
+                "Faculty-only permissions must be implemented before deployment."
+            )
 
 elif page == "Manage Requests":
     hero("Manage requests", "Edit entries, delete test data, or import and export CSV files.")
@@ -782,7 +788,7 @@ Install the required packages with `pip install streamlit pandas`, open a termin
 It keeps request details and evidence status together, routes request categories for monitoring, highlights potential time/delay issues, and prepares follow-up message drafts for a person to review.
 
 ### Important limitations
-The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. PDF text checks and follow-up draft generation are connected to the AI engineering helper; these are rule-based suggestions and templates, not a trained AI model, proof of authenticity, or automatic approval. Image OCR and automatic notifications are not implemented. Production deployment requires security review and end-to-end testing.
+The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. Evidence review is manual. Follow-up messages are generated using a basic text template. These features do not use a trained AI model. Image OCR and automatic notifications are not implemented. Production deployment requires security review and end-to-end testing.
 
 ### Privacy and demo guidance
 Request data is stored locally in SQLite (`echoguard.db`) and evidence uploads are stored in a local `evidence_uploads` folder. This is not a secure multi-user deployment. Use fictional records for the hackathon demonstration and do not enter sensitive student information.
