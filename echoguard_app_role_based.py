@@ -734,6 +734,11 @@ elif page == "Faculty Monitoring":
                 action_submit = st.form_submit_button("Save faculty action", type="primary", use_container_width=True)
             if action_submit:
                 current = st.session_state.requests_df.copy()
+                # pandas 3.x can infer datetime64 columns and reject Python date assignments.
+                # Keep editable date columns as object so date.today() remains compatible.
+                for date_col in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+                    if date_col in current.columns:
+                        current[date_col] = current[date_col].astype(object)
                 idxs = current.index[current["Request ID"].astype(str) == str(chosen)]
                 if len(idxs) == 0:
                     st.error("This request could not be found. Refresh and try again.")
@@ -793,6 +798,10 @@ elif page == "Manage Requests":
                 st.error("Due date and last-updated date must not be earlier than the submission date.")
             else:
                 current = st.session_state.requests_df.copy()
+                # Keep date columns object-typed before assigning datetime.date values (pandas 3.x).
+                for date_col in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+                    if date_col in current.columns:
+                        current[date_col] = current[date_col].astype(object)
                 idx = current.index[current["Request ID"].astype(str) == selected][0]
                 for col, val in {"Request Type": req_type.strip(), "Submission Date": submitted_date,
                                  "Expected Due Date": due_date, "Status": status, "Assigned To": owner.strip(),
@@ -811,6 +820,10 @@ elif page == "Manage Requests":
             review_save = st.form_submit_button("Save review details", type="primary")
         if review_save:
             current = st.session_state.requests_df.copy()
+            # Keep date columns object-typed before assigning datetime.date values (pandas 3.x).
+            for date_col in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+                if date_col in current.columns:
+                    current[date_col] = current[date_col].astype(object)
             idx = current.index[current["Request ID"].astype(str) == selected][0]
             current.loc[idx, "Evidence Verification"] = evidence_status
             current.loc[idx, "Faculty Notes"] = faculty_notes.strip()
