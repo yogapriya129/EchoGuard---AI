@@ -43,7 +43,7 @@ from pathlib import Path
 from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
-import echoguard_backend as backend
+import echoguard_backend_integrated as backend
 import echoguard_ai_engineering as ai_engineering
 
 st.set_page_config(page_title="EchoGuard AI", page_icon="🛡️", layout="wide")
