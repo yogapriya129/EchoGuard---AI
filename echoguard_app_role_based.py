@@ -21,7 +21,7 @@ TECHNOLOGY
 RUNNING THE PROTOTYPE
     1. Install dependencies:  pip install streamlit pandas
     2. Open a terminal in this file's folder.
-    3. Run:                   streamlit run echoguard_app_role_based.py
+    3. Run:                   streamlit run app.py
 
 IMPORTANT LIMITATIONS
     - This is a prototype, not a secure production system.
@@ -43,7 +43,7 @@ from pathlib import Path
 from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
-import echoguard_backend_integrated as backend
+import echoguard_backend as backend
 
 st.set_page_config(page_title="EchoGuard AI", page_icon="🛡️", layout="wide")
 
@@ -521,7 +521,7 @@ elif page == "Add Request":
             if evidence_file:
                 st.markdown("#### Evidence review")
                 st.info(
-                    "Evidence was saved. No AI engineering or automatic document analysis is used. "
+                    "Evidence was saved. No automatic document analysis is used. "
                     "An authorised faculty member must inspect the original file and update its verification status manually."
                 )
 
@@ -667,7 +667,7 @@ elif page == "Faculty Monitoring":
             st.write(f"**Priority reason:** {row['Priority reason']}")
             st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
-            st.write("PDF text checks and follow-up draft generation are connected to the EchoGuard AI engineering module. These checks are rule-based suggestions, not proof of authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
+            st.write("Evidence must be reviewed manually; the system does not automatically analyse documents or verify authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
             st.info("To update a request in this prototype, use Manage Requests. Faculty-only permissions must be implemented before deployment.")
 
 elif page == "Manage Requests":
@@ -819,17 +819,17 @@ EchoGuard AI is a student-built prototype intended to make college request progr
 - **Language:** Python
 - **Interface:** Streamlit with custom CSS
 - **Data handling:** pandas
-- **Storage:** SQLite database (`echoguard.db`) managed by `echoguard_backend_integrated.py`
+- **Storage:** SQLite database (`echoguard.db`) managed by `echoguard_backend.py`
 - **Legacy migration:** existing `echoguard_requests.csv` records are imported on first run only when the database is empty. CSV import/export remains available from Manage Requests.
 
 ### How to run
-Install the required packages with `pip install streamlit pandas`, open a terminal in the project folder, and run `streamlit run echoguard_app_role_based.py`.
+Install the required packages with `pip install streamlit pandas`, open a terminal in the project folder, and run `streamlit run app.py`.
 
 ### What makes the prototype useful
 It keeps request details and evidence status together, routes request categories for monitoring, highlights potential time/delay issues, and prepares follow-up message drafts for a person to review.
 
 ### Important limitations
-The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. No AI engineering module or automatic document analysis is connected. Evidence must be reviewed manually; follow-up drafts are simple text templates, not messages sent automatically. Production deployment requires security review and end-to-end testing.
+The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. Automatic document analysis is not connected. Evidence must be reviewed manually; follow-up drafts are simple text templates, not messages sent automatically. Production deployment requires security review and end-to-end testing.
 
 ### Privacy and demo guidance
 Request data is stored locally in SQLite (`echoguard.db`) and evidence uploads are stored in a local `evidence_uploads` folder. This is not a secure multi-user deployment. Use fictional records for the hackathon demonstration and do not enter sensitive student information.
