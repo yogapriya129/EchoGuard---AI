@@ -1,155 +1,107 @@
+"""
+EchoGuard AI — Role-Based Request Management Frontend (Prototype)
+
+PURPOSE
+    A Streamlit prototype for recording and monitoring college requests and
+    highlighting possible delay signals using transparent, hand-written rules.
+
+INCLUDED PAGES
+    1. Dashboard            — overview of stored requests and current statuses.
+    2. Add Request          — enter request/activity details and evidence status.
+    3. Request Tracking     — search/filter requests and inspect request details.
+    4. Delay Analysis       — rule-based warning signs and follow-up drafts.
+    5. Faculty Monitoring   — category routing and a monitoring view.
+    6. Manage Requests      — edit/manage records and import/export CSV data.
+    7. About                — project purpose, features, limits, and privacy notes.
+
+TECHNOLOGY
+    Python, Streamlit, and pandas. Records are stored locally in
+    echoguard_requests.csv, created beside this Python file on first run.
+
+RUNNING THE PROTOTYPE
+    1. Install dependencies:  pip install streamlit pandas
+    2. Open a terminal in this file's folder.
+    3. Run:                   streamlit run echoguard_app_role_based.py
+
+IMPORTANT LIMITATIONS
+    - This is a prototype, not a secure production system.
+    - The delay indicator is experimental and rule-based, not a validated AI
+      probability or trained machine-learning prediction.
+    - The faculty page does not provide real authentication/role permissions.
+    - Evidence uploads are not securely stored here; the prototype records a
+      filename/status rather than implementing secure document storage.
+    - A separate backend or AI module is not automatically integrated by this
+      frontend file. Notifications and production-grade multi-user storage are
+      also not provided unless separately implemented.
+    - Use fictional demo records; do not enter sensitive real student data.
+
+This header documents the code's intended scope; it does not claim that planned
+integrations are implemented.
+"""
+
 from pathlib import Path
 from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
-import re
-import json
-import hashlib
-import hmac
-import secrets
-import sqlite3
+import echoguard_backend as backend
+import echoguard_ai_engineering as ai_engineering
 
 st.set_page_config(page_title="EchoGuard AI", page_icon="🛡️", layout="wide")
 
-DATA_FILE = Path(__file__).with_name("echoguard_requests.csv")  # CSV export/backup
-DB_FILE = Path(__file__).with_name("echoguard.db")
-EVIDENCE_DIR = Path(__file__).with_name("evidence_uploads")
-EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+DATA_FILE = Path(__file__).with_name("echoguard_requests.csv")
 COLUMNS = [
     "Request ID", "Request Type", "Submission Date", "Expected Due Date",
     "Status", "Assigned To", "Last Updated", "Notes", "Student Name",
     "Activity Name", "Activity Date", "Activity Time", "Evidence File Name",
-    "Evidence Verification", "Routing Group", "Faculty Notes", "College Response Date", "Department", "Student Username"
+    "Evidence Verification", "Routing Group", "Faculty Notes", "College Response Date"
 ]
-STATUSES = ["Submitted", "Under Review", "Waiting for Information", "In Progress", "Accepted", "Completed", "Rejected"]
+STATUSES = ["Submitted", "Under Review", "Waiting for Information", "In Progress", "Completed", "Rejected"]
 TYPES = ["Internal OD", "External OD", "Bonafide Certificate", "Scholarship Application",
          "Exam Fee Correction", "ID Card Request", "Transcript Request", "Other"]
 EVIDENCE_STATUSES = ["Evidence Required", "Pending Verification", "AI Review", "Verified", "Verification Issue", "Not Required"]
-DEPARTMENTS = ["CSE", "ECE", "EEE", "AI & ML", "AI & DS", "Civil", "Mechanical", "IT", "Cybersecurity", "Other"]
 
 
 def blank_data():
     return pd.DataFrame(columns=COLUMNS)
 
 
-def db_connect():
-    conn = sqlite3.connect(DB_FILE, timeout=15)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with db_connect() as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS accounts (
-            email TEXT PRIMARY KEY COLLATE NOCASE,
-            role TEXT NOT NULL CHECK(role IN ('student','faculty')),
-            name TEXT NOT NULL,
-            department TEXT NOT NULL DEFAULT 'Other',
-            profile_json TEXT NOT NULL,
-            password_salt TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )""")
-        conn.execute("CREATE TABLE IF NOT EXISTS requests (request_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)")
-        conn.commit()
-
-
-def password_record(password, salt=None):
-    salt = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), 240_000).hex()
-    return salt, digest
-
-
-def verify_password(password, salt, expected_hash):
-    _, candidate = password_record(password, salt)
-    return hmac.compare_digest(candidate, expected_hash)
-
-
-def create_account(profile, password):
-    email = profile['email'].strip().lower()
-    salt, digest = password_record(password)
-    with db_connect() as conn:
-        try:
-            conn.execute("INSERT INTO accounts(email,role,name,department,profile_json,password_salt,password_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                         (email, profile['role'], profile['name'], profile.get('department','Other'),
-                          json.dumps(profile), salt, digest, datetime.now().isoformat(timespec='seconds')))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-
-def get_account(email):
-    with db_connect() as conn:
-        row = conn.execute("SELECT * FROM accounts WHERE email = ? COLLATE NOCASE", (email.strip().lower(),)).fetchone()
-    if not row:
-        return None
-    profile = json.loads(row['profile_json'])
-    profile.update({'email': row['email'], 'role': row['role'], 'name': row['name'], 'department': row['department']})
-    return {'profile': profile, 'password_salt': row['password_salt'], 'password_hash': row['password_hash']}
-
-
 def load_data():
-    init_db()
-    with db_connect() as conn:
-        rows = conn.execute("SELECT payload_json FROM requests ORDER BY rowid").fetchall()
-    if rows:
-        records = [json.loads(row['payload_json']) for row in rows]
-        df = pd.DataFrame(records)
-    elif DATA_FILE.exists():
-        # One-time import of existing CSV requests into SQLite.
-        try:
-            df = pd.read_csv(DATA_FILE, dtype={"Request ID": str})
-        except Exception:
-            st.error("Could not read echoguard_requests.csv. Check its columns and formatting.")
-            df = blank_data()
-    else:
-        df = blank_data()
-    for c in COLUMNS:
-        if c not in df:
-            df[c] = ""
-    df = df[COLUMNS]
-    date_columns = ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]
-    for c in date_columns:
-        df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
-    for c in COLUMNS:
-        df[c] = df[c].fillna("")
-    for c in COLUMNS:
-        if c not in date_columns:
-            df[c] = df[c].astype(str)
-    for i, row in df.iterrows():
-        if not row["Routing Group"]:
-            df.at[i, "Routing Group"] = routing_group(row["Request Type"])
-        if not row["Evidence Verification"]:
-            df.at[i, "Evidence Verification"] = "Not Required" if row["Request Type"] not in {"Internal OD", "External OD"} else "Evidence Required"
-    # Persist CSV-imported rows to the database on first load.
-    with db_connect() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
-        if count == 0 and not df.empty:
-            for _, row in df.iterrows():
-                payload = {c: (row[c].isoformat() if isinstance(row[c], date) else str(row[c]) if not pd.isna(row[c]) else "") for c in COLUMNS}
-                conn.execute("INSERT OR REPLACE INTO requests(request_id,payload_json) VALUES(?,?)", (str(row['Request ID']), json.dumps(payload)))
-            conn.commit()
-    return df
+    """Load requests from SQLite, migrating the legacy CSV once if needed."""
+    try:
+        backend.migrate_csv_once(DATA_FILE)
+        df = backend.load_requests()
+        for c in COLUMNS:
+            if c not in df:
+                df[c] = ""
+        df = df[COLUMNS]
+        date_cols = ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]
+        for c in date_cols:
+            df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
+        for c in COLUMNS:
+            df[c] = df[c].fillna("")
+        for c in COLUMNS:
+            if c not in date_cols:
+                df[c] = df[c].astype(str)
+        for i, row in df.iterrows():
+            if not row["Routing Group"]:
+                df.at[i, "Routing Group"] = routing_group(row["Request Type"])
+            if not row["Evidence Verification"]:
+                df.at[i, "Evidence Verification"] = "Not Required" if row["Request Type"] not in {"Internal OD", "External OD"} else "Evidence Required"
+        return df
+    except Exception as exc:
+        st.error("Could not load EchoGuard AI data from SQLite. Existing database/CSV data has not been intentionally replaced.")
+        st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
+        st.stop()
 
 
 def save_data(df):
-    init_db()
-    out = df.copy()
-    # Persist the canonical request records in SQLite.
-    with db_connect() as conn:
-        conn.execute("DELETE FROM requests")
-        for _, row in out.iterrows():
-            payload = {}
-            for c in COLUMNS:
-                value = row[c]
-                payload[c] = value.isoformat() if isinstance(value, date) else ("" if pd.isna(value) else str(value))
-            conn.execute("INSERT INTO requests(request_id,payload_json) VALUES(?,?)", (str(row['Request ID']), json.dumps(payload)))
-        conn.commit()
-    # Keep a human-readable CSV backup/export for compatibility with the existing project.
-    for c in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
-        out[c] = pd.to_datetime(out[c], errors="coerce").dt.strftime("%Y-%m-%d")
-    out.to_csv(DATA_FILE, index=False)
+    """Persist the complete current request table to SQLite transactionally."""
+    try:
+        backend.save_requests(df)
+    except Exception as exc:
+        st.error("Could not save request changes to echoguard.db. Please check the data and try again.")
+        st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
+        raise
 
 
 def next_id(df):
@@ -175,14 +127,8 @@ def to_date(value):
 
 
 def show_date(value):
-    """Format a date safely, including blank/invalid CSV date values."""
-    try:
-        d = to_date(value)
-        if d is None or pd.isna(d):
-            return "Not entered"
-        return d.strftime("%d %b %Y")
-    except (ValueError, TypeError, AttributeError):
-        return "Not entered"
+    d = to_date(value)
+    return d.strftime("%d %b %Y") if d else "Not entered"
 
 
 def routing_group(request_type):
@@ -206,7 +152,7 @@ def activity_delta(row):
 
 
 def is_resolved(status):
-    return str(status).strip() in {"Accepted", "Completed", "Rejected"}
+    return str(status).strip() in {"Completed", "Rejected"}
 
 
 def priority_for(row):
@@ -250,9 +196,10 @@ def analyse(row):
     owner = str(row.get("Assigned To", "")).strip()
     notes = str(row.get("Notes", "")).lower()
 
-    if status in {"Accepted", "Completed"}:
-        return {"value": 0, "reasons": ["The request is marked as completed."],
-                "actions": ["No follow-up is needed unless the requester reports a problem."]}
+    if status in {"Completed", "Rejected"}:
+        label = "completed" if status == "Completed" else "rejected"
+        return {"value": 0, "reasons": [f"The request is marked as {label}."],
+                "actions": ["No routine follow-up is needed unless the requester disputes the outcome or reports a problem."]}
 
     if due:
         remaining = (due - today).days
@@ -333,11 +280,10 @@ def analyse(row):
             "actions": list(dict.fromkeys(actions))}
 
 
-# SQLite is the canonical store for accounts and requests.
-init_db()
-
-if "authenticated_user" not in st.session_state:
-    st.session_state.authenticated_user = None
+if "requests_df" not in st.session_state:
+    st.session_state.requests_df = load_data()
+if "selected_id" not in st.session_state:
+    st.session_state.selected_id = None
 
 # Theme-aware CSS: colours inherit Streamlit's active theme variables.
 # No separate theme switch is added to the app.
@@ -370,104 +316,6 @@ def hero(title, subtitle):
     unsafe_allow_html=True)
 
 
-if not st.session_state.authenticated_user:
-    hero("Welcome to EchoGuard AI", "Choose your role, then sign in or create an account using your email.")
-    role_label = st.radio("I am a…", ["Student", "Teacher / Faculty"], horizontal=True)
-    chosen_role = "student" if role_label == "Student" else "faculty"
-    login_tab, signup_tab = st.tabs(["Sign in", "Create account"])
-
-    with login_tab:
-        with st.form("login_form"):
-            login_email = st.text_input("Email address", key="login_email").strip().lower()
-            login_password = st.text_input("Password", type="password", key="login_password")
-            submitted_login = st.form_submit_button("Sign in with email", type="primary", use_container_width=True)
-        st.button("Continue with Google", disabled=True, use_container_width=True,
-                  help="Google sign-in requires OAuth credentials and provider setup; it is not enabled in this local demo.")
-        if submitted_login:
-            account = get_account(login_email) if login_email else None
-            if account and verify_password(login_password, account["password_salt"], account["password_hash"]):
-                profile = account["profile"]
-                if profile.get("role") != chosen_role:
-                    st.error("This email is registered under a different role. Choose the role used when you created the account.")
-                else:
-                    st.session_state.authenticated_user = {
-                        "username": profile["email"], "email": profile["email"],
-                        "role": profile["role"], "name": profile.get("name", ""),
-                        "department": profile.get("department", "Other"), "profile": profile,
-                    }
-                    st.rerun()
-            else:
-                st.error("Email or password not found. If you are new, use Create account.")
-
-    with signup_tab:
-        with st.form("signup_form", clear_on_submit=False):
-            full_name = st.text_input("Full name")
-            signup_email = st.text_input("Email address").strip().lower()
-            signup_password = st.text_input("Create password", type="password")
-            confirm_password = st.text_input("Confirm password", type="password")
-            if chosen_role == "student":
-                student_id = st.text_input("Register number / Student ID")
-                student_department = st.selectbox("Department", DEPARTMENTS)
-                study_year = st.selectbox("Year of study", ["1st year", "2nd year", "3rd year", "4th year"])
-                section = st.text_input("Section (optional)")
-                faculty_department = ""
-                designation = ""
-            else:
-                faculty_department = st.selectbox("Faculty department", DEPARTMENTS)
-                designation = st.selectbox("Designation", ["Faculty", "Class Advisor", "HOD", "OD Coordinator", "Administrative Staff", "Other"])
-                student_id = ""
-                student_department = faculty_department
-                study_year = ""
-                section = ""
-            signup_submit = st.form_submit_button("Create account", type="primary", use_container_width=True)
-
-        if signup_submit:
-            signup_email = signup_email.strip().lower()
-            if not full_name.strip():
-                st.error("Please enter your full name.")
-            elif not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", signup_email):
-                st.error("Please enter a valid email address.")
-            elif len(signup_password) < 8:
-                st.error("Use a password with at least 8 characters.")
-            elif signup_password != confirm_password:
-                st.error("The passwords do not match.")
-            else:
-                profile = {
-                    "email": signup_email,
-                    "role": chosen_role,
-                    "name": full_name.strip(),
-                    "department": student_department,
-                }
-                if chosen_role == "student":
-                    profile.update({"student_id": student_id.strip(), "year": study_year, "section": section.strip()})
-                else:
-                    profile.update({"department": faculty_department, "designation": designation})
-                if not create_account(profile, signup_password):
-                    st.error("This email already has an account. Please sign in instead.")
-                else:
-                    st.session_state.authenticated_user = {
-                        "username": signup_email,
-                        "email": signup_email,
-                        "role": chosen_role,
-                        "name": profile["name"],
-                        "department": profile["department"],
-                        "profile": profile,
-                    }
-                    st.success("Account created. Opening your workspace…")
-                    st.rerun()
-
-    st.caption("Student and faculty accounts have separate profiles. Accounts and requests are stored in a local SQLite database on the computer running Streamlit.")
-    st.stop()
-
-CURRENT_USER = st.session_state.authenticated_user
-IS_FACULTY = CURRENT_USER["role"] == "faculty"
-
-if "requests_df" not in st.session_state:
-    st.session_state.requests_df = load_data()
-if "selected_id" not in st.session_state:
-    st.session_state.selected_id = None
-
-
 def card(label, value):
     st.markdown(f"""<div class="eg-card"><div class="eg-label">{label}</div>
     <div class="eg-value">{value}</div></div>""", unsafe_allow_html=True)
@@ -480,37 +328,20 @@ with st.sidebar:
     else:
         st.markdown("## 🛡️ EchoGuard AI")
     st.caption("An early-warning agent for hidden delays")
-    st.caption(f"Signed in: {CURRENT_USER['name']} ({CURRENT_USER['role'].title()})")
-    st.caption(f"Email: {CURRENT_USER.get('email', '')}")
-    if IS_FACULTY:
-        st.caption(f"Department: {CURRENT_USER.get('department', 'Other')} · {CURRENT_USER.get('profile', {}).get('designation', 'Faculty')}")
-    else:
-        student_profile = CURRENT_USER.get("profile", {})
-        st.caption(f"Student ID: {student_profile.get('student_id', 'Not entered')}")
-        st.caption(f"Department: {CURRENT_USER.get('department', 'Other')} · {student_profile.get('year', '')}")
-    pages = ["Dashboard", "Add Request", "Delay Analysis", "Manage Requests", "About"]
-    if IS_FACULTY:
-        pages.insert(3, "Faculty Monitoring")
-    page = st.radio("Navigate", pages, label_visibility="collapsed")
-    if st.button("Log out", use_container_width=True):
-        st.session_state.authenticated_user = None
-        st.rerun()
+    page = st.radio("Navigate", ["Dashboard", "Add Request", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "Manage Requests", "About"],
+                    label_visibility="collapsed")
     st.divider()
     st.caption("Theme: app menu ⋮ → Settings → Theme.")
-    st.caption("Accounts and requests are stored in echoguard.db; a CSV backup is also maintained.")
+    st.caption("Prototype data is saved locally to a CSV file.")
 
-all_requests_df = st.session_state.requests_df
-if IS_FACULTY:
-    df = all_requests_df.copy()
-else:
-    df = all_requests_df[all_requests_df["Student Username"].astype(str) == CURRENT_USER["username"]].copy()
+df = st.session_state.requests_df
 
 if page == "Dashboard":
     hero("See delays before they grow.",
          "Track college requests, spot missing updates, and get a clear next action—without assuming the reason for a delay.")
     today = date.today()
-    opened = int((~df["Status"].isin(["Accepted", "Completed", "Rejected"])).sum()) if not df.empty else 0
-    completed = int(df["Status"].isin(["Accepted", "Completed"]).sum()) if not df.empty else 0
+    opened = int((~df["Status"].isin(["Completed", "Rejected"])).sum()) if not df.empty else 0
+    completed = int((df["Status"] == "Completed").sum()) if not df.empty else 0
     analyses = [priority_for(r) for _, r in df.iterrows()] if not df.empty else []
     action_needed = sum(p in {"Immediate", "Urgent", "Overdue", "Follow-up"} for p, _ in analyses)
     overdue = sum(p == "Overdue" for p, _ in analyses)
@@ -547,14 +378,8 @@ if page == "Dashboard":
     else:
         st.subheader("Recently added requests")
         recent = df.tail(8).iloc[::-1].copy()
-        date_columns = [
-            "Submission Date", "Expected Due Date", "Last Updated",
-            "Activity Date", "College Response Date"
-        ]
-        for c in date_columns:
-            if c in recent.columns:
-                recent[c] = recent[c].apply(show_date)
-        recent = recent.astype(str)
+        for c in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+            recent[c] = recent[c].apply(show_date)
         st.dataframe(recent, use_container_width=True, hide_index=True)
 
 elif page == "Add Request":
@@ -563,8 +388,7 @@ elif page == "Add Request":
     with st.form("add_form", clear_on_submit=True):
         a, b = st.columns(2)
         with a:
-            student_name = st.text_input("Student name", value=CURRENT_USER["name"] if not IS_FACULTY else "")
-            department = st.selectbox("Department", DEPARTMENTS)
+            student_name = st.text_input("Student name")
             type_choice = st.selectbox("Request type", TYPES)
             custom_type = st.text_input("Enter request type") if type_choice == "Other" else ""
             submitted_date = st.date_input("Date request was submitted to college", value=date.today())
@@ -604,32 +428,114 @@ elif page == "Add Request":
             st.error("Please upload supporting evidence for this OD request.")
         else:
             current = st.session_state.requests_df.copy()
-            request_id = next_id(current)
             evidence_status = "Pending Verification" if evidence_file else ("Evidence Required" if is_od else "Not Required")
-            stored_evidence_name = ""
-            if evidence_file:
-                # The browser's file picker works on both laptops and phones.
-                # Save the uploaded bytes on the computer/server running Streamlit.
-                safe_original = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(evidence_file.name).name).strip("._") or "evidence"
-                stored_evidence_name = f"{request_id}_{safe_original}"
-                (EVIDENCE_DIR / stored_evidence_name).write_bytes(evidence_file.getvalue())
-            new_row = {"Request ID": request_id, "Request Type": req_type,
+            new_row = {"Request ID": next_id(current), "Request Type": req_type,
                        "Submission Date": submitted_date, "Expected Due Date": due_date,
                        "Status": status, "Assigned To": owner.strip(), "Last Updated": updated,
                        "Notes": notes.strip(), "Student Name": student_name.strip(),
                        "Activity Name": activity_name.strip(), "Activity Date": activity_date,
                        "Activity Time": activity_time.strftime("%H:%M") if activity_time else "",
-                       "Evidence File Name": stored_evidence_name,
+                       "Evidence File Name": evidence_file.name if evidence_file else "",
                        "Evidence Verification": evidence_status, "Routing Group": routing_group(req_type),
-                        "Faculty Notes": "", "College Response Date": "", "Department": department,
-                       "Student Username": CURRENT_USER["username"] if not IS_FACULTY else ""}
+                       "Faculty Notes": "", "College Response Date": ""}
+            # Store uploaded evidence locally. This does not authenticate the document.
+            if evidence_file:
+                try:
+                    saved_evidence_name = backend.save_evidence(evidence_file, new_row["Request ID"])
+                    new_row["Evidence File Name"] = saved_evidence_name
+                except Exception as exc:
+                    st.error(f"Could not save the evidence file: {exc}")
+                    st.stop()
+
             current = pd.concat([current, pd.DataFrame([new_row])], ignore_index=True)
             st.session_state.requests_df = current
             save_data(current)
             st.session_state.selected_id = new_row["Request ID"]
             st.success(f"Request {new_row['Request ID']} saved successfully.")
+
             if evidence_file:
-                st.info("Evidence uploaded and saved on the Streamlit host in the evidence_uploads folder. Faculty can download it from the review section.")
+                st.markdown("#### Evidence review suggestions")
+                if Path(evidence_file.name).suffix.lower() == ".pdf":
+                    extracted = ai_engineering.extract_text_from_file(evidence_file)
+                    if extracted.startswith("PDF extraction needs PyMuPDF") or extracted.startswith("Could not extract") or extracted.startswith("Unsupported file"):
+                        st.warning(extracted)
+                    else:
+                        report = ai_engineering.analyse_request(
+                            document_text=extracted,
+                            request_type=req_type,
+                            student_name=student_name.strip(),
+                            event_name=activity_name.strip(),
+                            event_date=str(activity_date) if activity_date else "",
+                        )
+                        st.write("**Suggested category:**", report["suggested_category"], f"(confidence: {report['category_confidence']})")
+                        if report["missing_information"]:
+                            st.warning("Items to review: " + "; ".join(report["missing_information"]))
+                        else:
+                            st.success("No obvious missing fields were detected by the basic checks.")
+                        for note in report["notes"]:
+                            st.caption(note)
+                        st.info("These are rule-based suggestions only. Faculty must inspect the original evidence and make the actual decision.")
+                else:
+                    st.info("The file was stored, but automatic text extraction currently supports text-based PDFs only. Image OCR is not implemented; please review this image manually.")
+
+elif page == "Request Tracking":
+    hero("Track a request", "Find a request, check its latest status, and review the dates and evidence information recorded in the prototype.")
+    if df.empty:
+        st.info("No requests to track yet. Add a request first.")
+    else:
+        search_col, status_col = st.columns([2, 1])
+        with search_col:
+            search_text = st.text_input("Search by request ID, student, or request type", placeholder="e.g. EG-0001 or scholarship")
+        with status_col:
+            status_filter = st.selectbox("Filter by status", ["All statuses"] + STATUSES)
+        tracked = df.copy()
+        if search_text.strip():
+            needle = search_text.strip().casefold()
+            searchable = tracked[["Request ID", "Student Name", "Request Type"]].astype(str).apply(
+                lambda col: col.str.casefold().str.contains(needle, regex=False)
+            ).any(axis=1)
+            tracked = tracked[searchable]
+        if status_filter != "All statuses":
+            tracked = tracked[tracked["Status"] == status_filter]
+        st.caption(f"Showing {len(tracked)} of {len(df)} recorded requests.")
+        if tracked.empty:
+            st.warning("No requests match those filters. Try another search or status.")
+        else:
+            display = tracked[["Request ID", "Request Type", "Student Name", "Submission Date", "Expected Due Date", "Status", "Evidence Verification", "Last Updated"]].copy()
+            for date_col in ["Submission Date", "Expected Due Date", "Last Updated"]:
+                display[date_col] = display[date_col].apply(show_date)
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            chosen_id = st.selectbox("View request details", tracked["Request ID"].astype(str).tolist(), key="tracking_request_id")
+            row = tracked[tracked["Request ID"].astype(str) == chosen_id].iloc[0]
+            st.subheader(f"Request {row['Request ID']}")
+            a, b, c = st.columns(3)
+            with a:
+                st.markdown("**Request type**")
+                st.write(row["Request Type"])
+                st.markdown("**Current status**")
+                st.write(row["Status"])
+            with b:
+                st.markdown("**Submitted**")
+                st.write(show_date(row["Submission Date"]))
+                st.markdown("**Expected response date**")
+                st.write(show_date(row["Expected Due Date"]))
+            with c:
+                st.markdown("**Assigned office**")
+                st.write(row["Assigned To"] or "Not assigned")
+                st.markdown("**Last updated**")
+                st.write(show_date(row["Last Updated"]))
+            st.markdown("**Evidence status**")
+            st.write(row["Evidence Verification"] or "Not recorded")
+            if row["Evidence File Name"]:
+                st.markdown("**Evidence filename**")
+                st.write(row["Evidence File Name"])
+            if row["Notes"]:
+                st.markdown("**Latest notes**")
+                st.write(row["Notes"])
+            if row["Faculty Notes"]:
+                st.markdown("**Faculty notes**")
+                st.write(row["Faculty Notes"])
+            st.info("This prototype tracks records stored in a local CSV file. It does not yet provide student login, private per-student access, or secure evidence-file storage.")
 
 elif page == "Delay Analysis":
     hero("Analyse a request", "Each request is checked individually. The percentage is an experimental rule-based indicator, not a proven probability.")
@@ -667,18 +573,22 @@ elif page == "Delay Analysis":
                 st.markdown(f"- {action}")
         with st.expander("Draft a follow-up message"):
             office = str(row["Assigned To"]).strip() or "the responsible office"
-            draft = (f"Hello {office},\n\nI am following up on '{row['Request Type']}' "
-                     f"(reference {row['Request ID']}), submitted on {show_date(row['Submission Date'])}. "
-                     f"The expected due date is {show_date(row['Expected Due Date'])}. "
-                     "Could you please share the current status and let me know if any additional information is needed?\n\nThank you.")
-            st.text_area("Review this message before sending", value=draft, height=180)
+            due_analysis = ai_engineering.analyse_delay(
+                row["Submission Date"], row["Expected Due Date"], row["Status"]
+            )
+            draft = ai_engineering.draft_follow_up(
+                student_name=str(row["Student Name"]),
+                request_id=str(row["Request ID"]),
+                request_type=str(row["Request Type"]),
+                submission_date=show_date(row["Submission Date"]),
+                status=str(row["Status"]),
+                days_overdue=due_analysis.get("days_overdue"),
+                faculty_name=office,
+            )
+            st.text_area("Review this message before sending", value=draft, height=220)
+            st.caption("This is a template-generated draft. It is not sent automatically.")
 
 elif page == "Faculty Monitoring":
-    if not IS_FACULTY:
-        st.error("Faculty access required.")
-        st.stop()
-    # Faculty works against the complete request list, not the student's filtered view.
-    df = st.session_state.requests_df.copy()
     hero("Faculty monitoring", "A central view for spotting urgent requests and routing them to the appropriate review group.")
     st.warning("Prototype: this page has no login or role-based access control yet. Do not use it for real student records until secure access is implemented.")
     df = st.session_state.requests_df
@@ -701,50 +611,17 @@ elif page == "Faculty Monitoring":
         if view.empty:
             st.success("No unresolved requests in this category.")
         else:
-            st.dataframe(view[["Request ID", "Student Name", "Department", "Request Type", "Activity Name", "Activity Date", "Activity Time", "Evidence File Name", "Evidence Verification", "Status", "Priority", "Routing Group"]], use_container_width=True, hide_index=True)
+            st.dataframe(view[["Request ID", "Student Name", "Request Type", "Activity Name", "Activity Date", "Activity Time", "Evidence File Name", "Evidence Verification", "Status", "Priority", "Routing Group"]], use_container_width=True, hide_index=True)
             st.subheader("Review a request")
             chosen = st.selectbox("Select request", view["Request ID"].astype(str).tolist(), key="faculty_review_id")
             row = view[view["Request ID"].astype(str) == chosen].iloc[0]
-            st.write(f"**Student:** {row['Student Name'] or 'Not entered'} · **Department:** {row.get('Department', 'Not entered') or 'Not entered'}")
+            st.write(f"**Student:** {row['Student Name'] or 'Not entered'}")
             st.write(f"**Request:** {row['Request Type']} — {row['Activity Name'] or row['Request Type']}")
             st.write(f"**Priority reason:** {row['Priority reason']}")
-            st.write(f"**Evidence filename:** {Path(str(row['Evidence File Name'])).name if row['Evidence File Name'] else 'No filename recorded'}")
+            st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
-            evidence_name = str(row.get("Evidence File Name", "")).strip()
-            evidence_path = EVIDENCE_DIR / Path(evidence_name).name if evidence_name else None
-            if evidence_path and evidence_path.is_file():
-                mime = "application/pdf" if evidence_path.suffix.lower() == ".pdf" else "image/" + evidence_path.suffix.lower().lstrip(".")
-                st.download_button("Download supporting evidence", data=evidence_path.read_bytes(),
-                                   file_name=evidence_path.name, mime=mime, key=f"evidence_{chosen}")
-                if evidence_path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                    st.image(str(evidence_path), caption="Uploaded supporting evidence", use_container_width=True)
-            elif evidence_name:
-                st.warning("Evidence file is referenced in the CSV, but the file is not present in evidence_uploads on this computer/server.")
-            st.markdown("### Faculty response")
-            st.caption("Choose a decision/status and save it here. This records the faculty response immediately in the prototype; it does not send a push notification to the student.")
-            status_options = STATUSES
-            current_status = str(row.get("Status", "Submitted"))
-            with st.form(f"faculty_response_{chosen}"):
-                new_status = st.selectbox("Decision / request status", status_options,
-                    index=status_options.index(current_status) if current_status in status_options else 0)
-                new_evidence_status = st.selectbox("Evidence verification", EVIDENCE_STATUSES,
-                    index=EVIDENCE_STATUSES.index(str(row.get("Evidence Verification", "Pending Verification"))) if str(row.get("Evidence Verification", "Pending Verification")) in EVIDENCE_STATUSES else 0)
-                response_note = st.text_area("Response / faculty notes", value=str(row.get("Faculty Notes", "")),
-                    placeholder="e.g. OD approved; please collect signed form from the office.")
-                response_now = st.form_submit_button("Submit faculty response", type="primary", use_container_width=True)
-            if response_now:
-                current = st.session_state.requests_df.copy()
-                idx = current.index[current["Request ID"].astype(str) == chosen][0]
-                current.loc[idx, "Status"] = new_status
-                current.loc[idx, "Evidence Verification"] = new_evidence_status
-                current.loc[idx, "Faculty Notes"] = response_note.strip()
-                current.loc[idx, "Last Updated"] = pd.Timestamp(date.today())
-                current.loc[idx, "College Response Date"] = pd.Timestamp(date.today())
-                st.session_state.requests_df = current
-                save_data(current)
-                st.success(f"Faculty response saved for {chosen}. Evidence verification and approval status are recorded separately.")
-                st.rerun()
-            st.info("AI checking, secure role-based access and automatic notifications still need integration. Faculty must make the actual approval decision; AI should not approve automatically.")
+            st.write("PDF text checks and follow-up draft generation are connected to the EchoGuard AI engineering module. These checks are rule-based suggestions, not proof of authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
+            st.info("To update a request in this prototype, use Manage Requests. Faculty-only permissions must be implemented before deployment.")
 
 elif page == "Manage Requests":
     hero("Manage requests", "Edit entries, delete test data, or import and export CSV files.")
@@ -752,18 +629,7 @@ elif page == "Manage Requests":
     if df.empty:
         st.info("There are no requests yet. Add one or import a CSV file.")
     else:
-        # Use a display-only copy so mixed date / datetime values do not crash
-        # Streamlit's Arrow table conversion. The underlying request data is unchanged.
-        display_df = df.copy()
-        display_date_columns = [
-            "Submission Date", "Expected Due Date", "Last Updated",
-            "Activity Date", "College Response Date"
-        ]
-        for col in display_date_columns:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(show_date)
-        display_df = display_df.fillna("").astype(str)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.subheader("Edit a request")
         ids = df["Request ID"].astype(str).tolist()
         selected = st.selectbox("Select request", ids, key="edit_id")
@@ -772,20 +638,25 @@ elif page == "Manage Requests":
             a, b = st.columns(2)
             with a:
                 req_type = st.text_input("Request type", value=str(row["Request Type"]))
-                dept_current = str(row.get("Department", "Other"))
-                department = st.selectbox("Department", DEPARTMENTS, index=DEPARTMENTS.index(dept_current) if dept_current in DEPARTMENTS else 0, key="edit_department")
                 submitted_date = st.date_input("Submission date", value=to_date(row["Submission Date"]) or date.today(), key="ed_sub")
                 due_date = st.date_input("Expected due date", value=to_date(row["Expected Due Date"]) or date.today(), key="ed_due")
                 old_status = str(row["Status"])
-                if IS_FACULTY:
-                    status = st.selectbox("Status", STATUSES, index=STATUSES.index(old_status) if old_status in STATUSES else 0)
-                else:
-                    status = old_status
-                    st.caption(f"Current status (faculty-managed): **{old_status}**")
+                status = st.selectbox("Status", STATUSES, index=STATUSES.index(old_status) if old_status in STATUSES else 0)
             with b:
                 owner = st.text_input("Assigned staff / office", value=str(row["Assigned To"]))
-                updated = st.date_input("Last updated date", value=to_date(row["Last Updated"]) or date.today(), key="ed_upd")
+
+                # Ensure Streamlit receives a datetime.date, never NaN/float.
+                updated_value = to_date(row["Last Updated"])
+                if not isinstance(updated_value, date):
+                    updated_value = date.today()
+
+                updated = st.date_input(
+                    "Last updated date",
+                    value=updated_value,
+                    key="ed_upd",
+                )
                 notes = st.text_area("Notes", value=str(row["Notes"]), height=130)
+
             update = st.form_submit_button("Save changes", type="primary", use_container_width=True)
         if update:
             if not req_type.strip():
@@ -795,7 +666,7 @@ elif page == "Manage Requests":
             else:
                 current = st.session_state.requests_df.copy()
                 idx = current.index[current["Request ID"].astype(str) == selected][0]
-                for col, val in {"Request Type": req_type.strip(), "Department": department, "Submission Date": submitted_date,
+                for col, val in {"Request Type": req_type.strip(), "Submission Date": submitted_date,
                                  "Expected Due Date": due_date, "Status": status, "Assigned To": owner.strip(),
                                  "Last Updated": updated, "Notes": notes.strip()}.items():
                     current.loc[idx, col] = val
@@ -803,32 +674,28 @@ elif page == "Manage Requests":
                 save_data(current)
                 st.success("Request updated.")
                 st.rerun()
-        if IS_FACULTY:
-            st.subheader("Evidence and faculty review")
-            with st.form("review_fields_form"):
-                ev_current = str(row.get("Evidence Verification", "Evidence Required"))
-                ev_index = EVIDENCE_STATUSES.index(ev_current) if ev_current in EVIDENCE_STATUSES else 0
-                evidence_status = st.selectbox("Evidence verification status", EVIDENCE_STATUSES, index=ev_index)
-                faculty_notes = st.text_area("Faculty / review notes", value=str(row.get("Faculty Notes", "")))
-                review_save = st.form_submit_button("Save review details", type="primary")
-            if review_save:
-                current = st.session_state.requests_df.copy()
-                idx = current.index[current["Request ID"].astype(str) == selected][0]
-                current.loc[idx, "Evidence Verification"] = evidence_status
-                current.loc[idx, "Faculty Notes"] = faculty_notes.strip()
-                if str(current.loc[idx, "Status"]) in {"Accepted", "Completed", "Rejected"}:
-                    current.loc[idx, "College Response Date"] = pd.Timestamp(date.today())
-                st.session_state.requests_df = current
-                save_data(current)
-                st.success("Evidence/review details saved.")
-                st.rerun()
+        st.subheader("Evidence and faculty review")
+        with st.form("review_fields_form"):
+            ev_current = str(row.get("Evidence Verification", "Evidence Required"))
+            ev_index = EVIDENCE_STATUSES.index(ev_current) if ev_current in EVIDENCE_STATUSES else 0
+            evidence_status = st.selectbox("Evidence verification status", EVIDENCE_STATUSES, index=ev_index)
+            faculty_notes = st.text_area("Faculty / review notes", value=str(row.get("Faculty Notes", "")))
+            review_save = st.form_submit_button("Save review details", type="primary")
+        if review_save:
+            current = st.session_state.requests_df.copy()
+            idx = current.index[current["Request ID"].astype(str) == selected][0]
+            current.loc[idx, "Evidence Verification"] = evidence_status
+            current.loc[idx, "Faculty Notes"] = faculty_notes.strip()
+            if str(current.loc[idx, "Status"]) in {"Completed", "Rejected"}:
+                current.loc[idx, "College Response Date"] = date.today()
+            st.session_state.requests_df = current
+            save_data(current)
+            st.success("Evidence/review details saved.")
+            st.rerun()
 
-        if IS_FACULTY:
-            st.subheader("Delete a request")
-            confirm = st.checkbox(f"I want to permanently delete {selected}", key="confirm_delete")
-        else:
-            confirm = False
-        if IS_FACULTY and st.button("Delete selected request", disabled=not confirm):
+        st.subheader("Delete a request")
+        confirm = st.checkbox(f"I want to permanently delete {selected}", key="confirm_delete")
+        if st.button("Delete selected request", disabled=not confirm):
             current = st.session_state.requests_df
             current = current[current["Request ID"].astype(str) != selected].copy()
             st.session_state.requests_df = current
@@ -854,19 +721,29 @@ elif page == "Manage Requests":
                 st.error("CSV is missing these columns: " + ", ".join(missing))
             else:
                 incoming = incoming[COLUMNS].copy()
-                for c in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+                date_columns = ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]
+                for c in date_columns:
                     incoming[c] = pd.to_datetime(incoming[c], errors="coerce").dt.date
-                for c in ["Request ID", "Request Type", "Status", "Assigned To", "Notes"]:
-                    incoming[c] = incoming[c].fillna("").astype(str)
+                for c in COLUMNS:
+                    if c not in date_columns:
+                        incoming[c] = incoming[c].fillna("").astype(str)
+                # Duplicate or blank IDs make tracking/editing ambiguous.
+                if incoming["Request ID"].str.strip().eq("").any() or incoming["Request ID"].duplicated().any():
+                    st.warning("Blank or duplicate request IDs were found. They will be regenerated during import.")
                 st.caption(f"{len(incoming)} row(s) found.")
                 if st.button("Import CSV", type="primary"):
                     if method == "Replace current requests":
-                        result = incoming
+                        result = blank_data()
+                        for _, incoming_row in incoming.iterrows():
+                            item = incoming_row.to_dict()
+                            if not str(item["Request ID"]).strip() or str(item["Request ID"]) in set(result["Request ID"].astype(str)):
+                                item["Request ID"] = next_id(result)
+                            result = pd.concat([result, pd.DataFrame([item])], ignore_index=True)
                     else:
                         result = st.session_state.requests_df.copy()
                         for _, incoming_row in incoming.iterrows():
                             item = incoming_row.to_dict()
-                            if not item["Request ID"].strip() or item["Request ID"] in set(result["Request ID"].astype(str)):
+                            if not str(item["Request ID"]).strip() or str(item["Request ID"]) in set(result["Request ID"].astype(str)):
                                 item["Request ID"] = next_id(result)
                             result = pd.concat([result, pd.DataFrame([item])], ignore_index=True)
                     st.session_state.requests_df = result[COLUMNS]
@@ -879,25 +756,36 @@ elif page == "Manage Requests":
 elif page == "About":
     hero("About EchoGuard AI", "A student prototype for spotting possible delay signals in college request workflows.")
     st.markdown("""
-### The problem
-Requests may be delayed when a due date passes, ownership is unclear, updates stop, or a handover or missing document is mentioned.
+### Project overview
+EchoGuard AI is a student-built prototype intended to make college request progress easier to record, monitor, and discuss. It highlights possible delay signals so users can decide which requests may need attention.
 
-### What it does
-- Stores requests entered by the user; no sample requests are preloaded.
-- Separates internal OD, external OD and certificate/admin requests.
-- Flags unresolved activities starting within 20 minutes for immediate review.
-- Tracks supporting-evidence status separately from college approval.
-- Provides a faculty monitoring view with category-based routing.
-- Checks visible, rule-based warning signs.
-- Shows one experimental delay-indicator percentage for each request.
-- Explains warning signs and suggests next actions.
-- Drafts a follow-up message for a person to review.
+### Pages and included features
+- **Dashboard:** overview of request records and their statuses.
+- **Add Request:** record request type, dates, activity details, notes, and evidence status.
+- **Request Tracking:** find requests, apply filters, and review individual request details.
+- **Delay Analysis:** view rule-based warning signs, an experimental delay indicator, and suggested next actions.
+- **Faculty Monitoring:** review requests using category-based routing and monitoring information.
+- **Manage Requests:** maintain records and import/export CSV data.
+- **About:** project purpose, scope, limitations, and data-handling information.
 
-### Important limitation
-The percentage is **not a validated probability**. It is an experimental prototype indicator based on hand-written rules. A genuine probability estimate would require suitable historical requests, known outcomes, and model validation.
+### Technology and data flow
+- **Language:** Python
+- **Interface:** Streamlit with custom CSS
+- **Data handling:** pandas
+- **Storage:** SQLite database (`echoguard.db`) managed by `echoguard_backend.py`
+- **Legacy migration:** existing `echoguard_requests.csv` records are imported on first run only when the database is empty. CSV import/export remains available from Manage Requests.
 
-### Privacy and storage
-Data is saved in `echoguard_requests.csv` beside `app.py` on the computer running Streamlit. Evidence uploads are saved in an `evidence_uploads` folder on the computer/server running Streamlit. This is suitable only for a local demo; secure access controls, protected storage, AI document checking, role-based permissions and notifications must be implemented before real deployment. Use fictional data for presentations and do not enter sensitive student details. This local CSV is not a secure multi-user database.
+### How to run
+Install the required packages with `pip install streamlit pandas`, open a terminal in the project folder, and run `streamlit run echoguard_app_role_based.py`.
+
+### What makes the prototype useful
+It keeps request details and evidence status together, routes request categories for monitoring, highlights potential time/delay issues, and prepares follow-up message drafts for a person to review.
+
+### Important limitations
+The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. PDF text checks and follow-up draft generation are connected to the AI engineering helper; these are rule-based suggestions and templates, not a trained AI model, proof of authenticity, or automatic approval. Image OCR and automatic notifications are not implemented. Production deployment requires security review and end-to-end testing.
+
+### Privacy and demo guidance
+Request data is stored locally in SQLite (`echoguard.db`) and evidence uploads are stored in a local `evidence_uploads` folder. This is not a secure multi-user deployment. Use fictional records for the hackathon demonstration and do not enter sensitive student information.
 """)
 
 st.divider()
