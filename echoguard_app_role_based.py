@@ -459,16 +459,6 @@ elif page == "Add Request":
                     "Automatic AI analysis is disabled. "
                     "Faculty must review the original document manually."
                 )
-                        st.write("**Suggested category:**", report["suggested_category"], f"(confidence: {report['category_confidence']})")
-                        if report["missing_information"]:
-                            st.warning("Items to review: " + "; ".join(report["missing_information"]))
-                        else:
-                            st.success("No obvious missing fields were detected by the basic checks.")
-                        for note in report["notes"]:
-                            st.caption(note)
-                        st.info("These are rule-based suggestions only. Faculty must inspect the original evidence and make the actual decision.")
-                else:
-                    st.info("The file was stored, but automatic text extraction currently supports text-based PDFs only. Image OCR is not implemented; please review this image manually.")
 
 elif page == "Request Tracking":
     hero("Track a request", "Find a request, check its latest status, and review the dates and evidence information recorded in the prototype.")
