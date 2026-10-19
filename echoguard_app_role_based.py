@@ -782,12 +782,35 @@ elif page == "Manage Requests":
                 else:
                     status = old_status
                     st.caption(f"Current status (faculty-managed): **{old_status}**")
-            with b:
-                owner = st.text_input("Assigned staff / office", value=str(row["Assigned To"]))
-                updated = st.date_input("Last updated date", value=to_date(row["Last Updated"]) or date.today(), key="ed_upd")
-                notes = st.text_area("Notes", value=str(row["Notes"]), height=130)
-            update = st.form_submit_button("Save changes", type="primary", use_container_width=True)
-        if update:
+                      with b:
+                owner = st.text_input(
+                    "Assigned staff / office",
+                    value=str(row["Assigned To"])
+                )
+
+                updated_value = to_date(row["Last Updated"])
+                if not isinstance(updated_value, date):
+                    updated_value = date.today()
+
+                updated = st.date_input(
+                    "Last updated date",
+                    value=updated_value,
+                    key="ed_upd"
+                )
+
+                notes = st.text_area(
+                    "Notes",
+                    value=str(row["Notes"]),
+                    height=130
+                )
+
+            update = st.form_submit_button(
+                "Save changes",
+                type="primary",
+                use_container_width=True
+            )
+
+            if update:
             if not req_type.strip():
                 st.error("Request type cannot be empty.")
             elif due_date < submitted_date or updated < submitted_date:
