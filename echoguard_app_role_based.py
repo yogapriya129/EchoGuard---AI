@@ -123,21 +123,34 @@ def next_id(df):
 
 
 def to_date(value):
-    if value is None or pd.isna(value):
+    """Convert messy CSV/SQLite date values safely; treat NaN/NaT as missing."""
+    if value is None:
         return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
+        return value.date()
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     try:
-        return pd.to_datetime(value).date()
-    except Exception:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def show_date(value):
     d = to_date(value)
-    return d.strftime("%d %b %Y") if d else "Not entered"
+    return d.strftime("%d %b %Y") if d is not None else "Not entered"
 
 
 def routing_group(request_type):
