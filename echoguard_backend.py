@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import sqlite3
 from datetime import date, datetime
@@ -25,8 +26,8 @@ COLUMNS = [
     "Evidence Verification", "Routing Group", "Faculty Notes", "College Response Date",
 ]
 DATE_COLUMNS = {"Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"}
-STATUSES = {"Submitted", "Under Review", "Waiting for Information", "In Progress", "Completed", "Rejected"}
-EVIDENCE_STATUSES = {"Evidence Required", "Pending Verification", "AI Review", "Verified", "Verification Issue", "Not Required"}
+STATUSES = {"Submitted", "Under Review", "Waiting for Information", "In Progress", "Accepted", "Completed", "Rejected"}
+EVIDENCE_STATUSES = {"Evidence Required", "Pending Verification", "Verified", "Verification Issue", "Not Required"}
 
 
 class BackendError(Exception):
@@ -41,9 +42,71 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+
+# ---------------------- LOCAL ACCOUNT AUTHENTICATION ----------------------
+import hashlib
+import hmac
+import secrets
+
+ROLE_STUDENT = "Student"
+ROLE_TEACHER = "Teacher"
+
+def _password_hash(password: str, salt: bytes | None = None) -> tuple[str, str]:
+    if not isinstance(password, str) or len(password) < 8:
+        raise BackendError("Password must contain at least 8 characters.")
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
+    return salt.hex(), digest.hex()
+
+def _ensure_users_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY COLLATE NOCASE,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('Student','Teacher')),
+        salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+def register_user(username: str, display_name: str, role: str, password: str) -> dict[str, str]:
+    username = str(username or "").strip().lower()
+    display_name = str(display_name or "").strip()
+    role = str(role or "").strip().title()
+    if not re.fullmatch(r"[a-z0-9_.-]{3,32}", username):
+        raise BackendError("Username must be 3–32 characters: letters, numbers, dot, underscore or hyphen.")
+    if len(display_name) < 2:
+        raise BackendError("Please enter your full name.")
+    if role not in {ROLE_STUDENT, ROLE_TEACHER}:
+        raise BackendError("Choose Student or Teacher account type.")
+    salt, digest = _password_hash(password)
+    initialize_database()
+    with _connect() as conn:
+        _ensure_users_table(conn)
+        try:
+            conn.execute("INSERT INTO users(username,display_name,role,salt,password_hash) VALUES(?,?,?,?,?)",
+                         (username, display_name, role, salt, digest))
+        except sqlite3.IntegrityError as exc:
+            raise BackendError("That username is already registered. Please choose another.") from exc
+    return {"username": username, "display_name": display_name, "role": role}
+
+def authenticate_user(username: str, password: str) -> dict[str, str] | None:
+    username = str(username or "").strip().lower()
+    initialize_database()
+    with _connect() as conn:
+        _ensure_users_table(conn)
+        row = conn.execute("SELECT username,display_name,role,salt,password_hash FROM users WHERE username = ?", (username,)).fetchone()
+    if not row or not isinstance(password, str):
+        return None
+    candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(row["salt"]), 240_000).hex()
+    if not hmac.compare_digest(candidate, row["password_hash"]):
+        return None
+    return {"username": row["username"], "display_name": row["display_name"], "role": row["role"]}
+
+
 def initialize_database() -> None:
     """Create the request table and useful indexes if they do not exist."""
     with _connect() as conn:
+        _ensure_users_table(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS requests (
                 request_id TEXT PRIMARY KEY,
@@ -221,9 +284,23 @@ def save_requests(frame: pd.DataFrame) -> None:
         raise BackendError("Duplicate Request IDs found; no data was saved.")
     initialize_database()
     db_cols = ["request_id", "request_type", "submission_date", "expected_due_date", "status", "assigned_to", "last_updated", "notes", "student_name", "activity_name", "activity_date", "activity_time", "evidence_file_name", "evidence_verification", "routing_group", "faculty_notes", "college_response_date"]
-    sql = f"INSERT INTO requests ({', '.join(db_cols)}) VALUES ({', '.join('?' for _ in db_cols)})"
-    values = [[r[c] for c in COLUMNS] for r in records]
     with _connect() as conn:
+        # Some earlier deployed EchoGuard databases have a legacy NOT NULL
+        # payload_json column. Populate it when present, while remaining compatible
+        # with the current normalized schema where that column does not exist.
+        table_columns = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        has_payload_json = "payload_json" in table_columns
+        insert_cols = list(db_cols)
+        if has_payload_json:
+            insert_cols.append("payload_json")
+        sql = f"INSERT INTO requests ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
+        values = []
+        for record in records:
+            row_values = [record[c] for c in COLUMNS]
+            if has_payload_json:
+                row_values.append(json.dumps(record, ensure_ascii=False))
+            values.append(row_values)
+        # Keep delete + insert atomic. Validation above happens before this transaction.
         conn.execute("DELETE FROM requests")
         if values:
             conn.executemany(sql, values)
