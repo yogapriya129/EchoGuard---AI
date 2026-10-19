@@ -52,7 +52,7 @@ COLUMNS = [
     "Activity Name", "Activity Date", "Activity Time", "Evidence File Name",
     "Evidence Verification", "Routing Group", "Faculty Notes", "College Response Date"
 ]
-STATUSES = ["Submitted", "Under Review", "Waiting for Information", "In Progress", "Completed", "Rejected"]
+STATUSES = ["Submitted", "Under Review", "Waiting for Information", "In Progress", "Accepted", "Completed", "Rejected"]
 TYPES = ["Internal OD", "External OD", "Bonafide Certificate", "Scholarship Application",
          "Exam Fee Correction", "ID Card Request", "Transcript Request", "Other"]
 EVIDENCE_STATUSES = ["Evidence Required", "Pending Verification", "Verified", "Verification Issue", "Not Required"]
@@ -91,7 +91,7 @@ def load_data():
         st.stop()
 
 
-def save_data(df):
+def save_data(df, note=""):
     """Persist request data through the backend; student saves preserve other users' records."""
     try:
         if st.session_state.get("user_role") == "Student":
@@ -104,9 +104,9 @@ def save_data(df):
             all_names = all_rows["Student Name"].astype(str).str.strip().str.casefold()
             others = all_rows[all_names != owner].copy()
             combined = pd.concat([others, own_rows], ignore_index=True)
-            backend.save_requests(combined)
+            backend.save_requests(combined, changed_by=st.session_state.get("display_name", "Student"), changed_role="Student", note=note)
         else:
-            backend.save_requests(df)
+            backend.save_requests(df, changed_by=st.session_state.get("display_name", "User"), changed_role=st.session_state.get("user_role", "System"), note=note)
     except Exception as exc:
         st.error("Could not save request changes to echoguard.db. Please check the data and try again.")
         st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
@@ -411,6 +411,7 @@ with st.sidebar:
     st.caption(f"Signed in as **{st.session_state.username}** · {st.session_state.user_role}")
     role_pages = {
         "Student": ["Dashboard", "Add Request", "Request Tracking", "About"],
+        "Teacher": ["Dashboard", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "About"],
         "Faculty": ["Dashboard", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "About"],
         "Admin": ["Dashboard", "Add Request", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "Manage Requests", "About"],
     }
@@ -615,7 +616,16 @@ elif page == "Request Tracking":
             if row["Faculty Notes"]:
                 st.markdown("**Faculty notes**")
                 st.write(row["Faculty Notes"])
-            st.info("Request records are stored in the local SQLite database. Student views are filtered to the registered display name in this prototype; this is not production-grade access control.")
+            st.subheader("Request status timeline")
+            try:
+                history = backend.get_status_history(str(chosen_id))
+                if history.empty:
+                    st.caption("No status changes have been recorded yet. New changes will appear here.")
+                else:
+                    st.dataframe(history, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.warning(f"Status history could not be loaded: {exc}")
+            st.info("Request records and status changes are stored in SQLite. Student views are filtered to the registered display name in this prototype; this is not production-grade access control.")
 
 elif page == "Delay Analysis":
     hero("Analyse a request", "Each request is checked individually. The percentage is an experimental rule-based indicator, not a proven probability.")
@@ -700,6 +710,45 @@ elif page == "Faculty Monitoring":
             st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
             st.write("Evidence must be reviewed manually; the system does not automatically analyse documents or verify authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
+            st.subheader("Faculty action")
+            st.caption("Accept a request, move it through review, or mark it completed. Every status change is added to the request tracking timeline.")
+            allowed_next = [status for status in STATUSES if status != str(row["Status"])]
+            with st.form(f"faculty_action_{chosen}"):
+                action_status = st.selectbox(
+                    "Update request status",
+                    allowed_next,
+                    index=allowed_next.index("Accepted") if "Accepted" in allowed_next else 0,
+                    key=f"faculty_status_{chosen}",
+                )
+                action_owner = st.text_input(
+                    "Assigned faculty / office",
+                    value=str(row.get("Assigned To", "") or st.session_state.get("display_name", "")),
+                    key=f"faculty_owner_{chosen}",
+                )
+                action_note = st.text_area(
+                    "Update note for the student tracking timeline",
+                    value="",
+                    placeholder="e.g. Request accepted; processing will begin.",
+                    key=f"faculty_note_{chosen}",
+                )
+                action_submit = st.form_submit_button("Save faculty action", type="primary", use_container_width=True)
+            if action_submit:
+                current = st.session_state.requests_df.copy()
+                idxs = current.index[current["Request ID"].astype(str) == str(chosen)]
+                if len(idxs) == 0:
+                    st.error("This request could not be found. Refresh and try again.")
+                else:
+                    idx = idxs[0]
+                    current.loc[idx, "Status"] = action_status
+                    current.loc[idx, "Assigned To"] = action_owner.strip()
+                    current.loc[idx, "Last Updated"] = date.today()
+                    current.loc[idx, "Faculty Notes"] = action_note.strip() or str(current.loc[idx, "Faculty Notes"] or "")
+                    if action_status in {"Completed", "Rejected"}:
+                        current.loc[idx, "College Response Date"] = date.today()
+                    st.session_state.requests_df = current
+                    save_data(current, note=action_note.strip() or f"Faculty updated status to {action_status}")
+                    st.success(f"{chosen} updated to {action_status}. The tracking timeline has been recorded.")
+                    st.rerun()
             st.info("Review permissions are prototype-level; validate them thoroughly before real deployment.")
 
 elif page == "Manage Requests":
