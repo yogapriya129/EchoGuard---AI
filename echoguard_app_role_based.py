@@ -27,7 +27,7 @@ IMPORTANT LIMITATIONS
     - This is a prototype, not a secure production system.
     - The delay indicator is experimental and rule-based, not a validated AI
       probability or trained machine-learning prediction.
-    - The faculty page does not provide real authentication/role permissions.
+    - Demo login and role-specific menus are frontend-only and are not secure authentication.
     - Evidence uploads are not securely stored here; the prototype records a
       filename/status rather than implementing secure document storage.
     - A separate backend or AI module is not automatically integrated by this
@@ -43,7 +43,8 @@ from pathlib import Path
 from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
-import echoguard_backend_integrated as backend
+import echoguard_backend as backend
+import echoguard_ai_engineering as ai_engineering
 
 st.set_page_config(page_title="EchoGuard AI", page_icon="🛡️", layout="wide")
 
@@ -279,6 +280,60 @@ def analyse(row):
             "actions": list(dict.fromkeys(actions))}
 
 
+# ---------------------- DEMO LOGIN (FRONTEND PROTOTYPE) ----------------------
+# Demo credentials only. This is NOT production authentication; credentials are
+# stored in source code and real access control must be enforced by a backend.
+DEMO_USERS = {
+    "student": {"password": "student123", "role": "Student"},
+    "faculty": {"password": "faculty123", "role": "Faculty"},
+    "admin": {"password": "admin123", "role": "Admin"},
+}
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "user_role" not in st.session_state:
+    st.session_state.user_role = ""
+if "username" not in st.session_state:
+    st.session_state.username = ""
+
+if not st.session_state.authenticated:
+    st.markdown("""
+    <style>
+    .login-wrap {max-width:650px; margin:2rem auto; padding:2rem; border:1px solid var(--border-color);
+      border-radius:22px; background:var(--secondary-background-color);}
+    .login-kicker {font-size:.8rem; letter-spacing:.16em; text-transform:uppercase;
+      color:var(--primary-color); font-weight:800;}
+    .login-title {font-size:2.5rem; line-height:1.1; font-weight:850; margin:.5rem 0;}
+    .login-copy {opacity:.78; margin-bottom:1rem;}
+    </style>
+    <div class="login-wrap"><div class="login-kicker">🛡️ EchoGuard AI</div>
+    <div class="login-title">Welcome back.</div>
+    <div class="login-copy">Sign in to continue to your request dashboard.</div></div>
+    """, unsafe_allow_html=True)
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        with st.form("echoguard_login_form"):
+            username_input = st.text_input("Username", placeholder="Enter demo username")
+            password_input = st.text_input("Password", type="password", placeholder="Enter password")
+            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+        if submitted:
+            user = DEMO_USERS.get(username_input.strip().lower())
+            if user and password_input == user["password"]:
+                st.session_state.authenticated = True
+                st.session_state.username = username_input.strip().lower()
+                st.session_state.user_role = user["role"]
+                st.session_state.page_after_login = "Dashboard"
+                st.rerun()
+            else:
+                st.error("Invalid username or password. Please try again.")
+        with st.expander("Demo login credentials"):
+            st.markdown("- **Student:** `student` / `student123`\n- **Faculty:** `faculty` / `faculty123`\n- **Admin:** `admin` / `admin123`")
+        st.caption("Demo credentials are for presentation only. Do not use real passwords or sensitive student data.")
+    st.stop()
+
+# Initialise application data only after the demo login gate.
+
+
 if "requests_df" not in st.session_state:
     st.session_state.requests_df = load_data()
 if "selected_id" not in st.session_state:
@@ -327,11 +382,23 @@ with st.sidebar:
     else:
         st.markdown("## 🛡️ EchoGuard AI")
     st.caption("An early-warning agent for hidden delays")
-    page = st.radio("Navigate", ["Dashboard", "Add Request", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "Manage Requests", "About"],
-                    label_visibility="collapsed")
+    st.caption(f"Signed in as **{st.session_state.username}** · {st.session_state.user_role}")
+    role_pages = {
+        "Student": ["Dashboard", "Add Request", "Request Tracking", "About"],
+        "Faculty": ["Dashboard", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "About"],
+        "Admin": ["Dashboard", "Add Request", "Request Tracking", "Delay Analysis", "Faculty Monitoring", "Manage Requests", "About"],
+    }
+    available_pages = role_pages.get(st.session_state.user_role, ["Dashboard", "About"])
+    default_page = st.session_state.pop("page_after_login", available_pages[0])
+    default_index = available_pages.index(default_page) if default_page in available_pages else 0
+    page = st.radio("Navigate", available_pages, index=default_index, label_visibility="collapsed")
     st.divider()
+    if st.button("Log out", use_container_width=True):
+        for key in ["authenticated", "user_role", "username", "page_after_login"]:
+            st.session_state.pop(key, None)
+        st.rerun()
     st.caption("Theme: app menu ⋮ → Settings → Theme.")
-    st.caption("Prototype data is saved locally to a SQLite file.")
+    st.caption("Prototype data is saved locally to SQLite.")
 
 df = st.session_state.requests_df
 
@@ -453,12 +520,29 @@ elif page == "Add Request":
             st.success(f"Request {new_row['Request ID']} saved successfully.")
 
             if evidence_file:
-                st.markdown("#### Evidence review")
-                st.info(
-                    "Evidence uploaded successfully. "
-                    "Automatic AI analysis is disabled. "
-                    "Faculty must review the original document manually."
-                )
+                st.markdown("#### Evidence review suggestions")
+                if Path(evidence_file.name).suffix.lower() == ".pdf":
+                    extracted = ai_engineering.extract_text_from_file(evidence_file)
+                    if extracted.startswith("PDF extraction needs PyMuPDF") or extracted.startswith("Could not extract") or extracted.startswith("Unsupported file"):
+                        st.warning(extracted)
+                    else:
+                        report = ai_engineering.analyse_request(
+                            document_text=extracted,
+                            request_type=req_type,
+                            student_name=student_name.strip(),
+                            event_name=activity_name.strip(),
+                            event_date=str(activity_date) if activity_date else "",
+                        )
+                        st.write("**Suggested category:**", report["suggested_category"], f"(confidence: {report['category_confidence']})")
+                        if report["missing_information"]:
+                            st.warning("Items to review: " + "; ".join(report["missing_information"]))
+                        else:
+                            st.success("No obvious missing fields were detected by the basic checks.")
+                        for note in report["notes"]:
+                            st.caption(note)
+                        st.info("These are rule-based suggestions only. Faculty must inspect the original evidence and make the actual decision.")
+                else:
+                    st.info("The file was stored, but automatic text extraction currently supports text-based PDFs only. Image OCR is not implemented; please review this image manually.")
 
 elif page == "Request Tracking":
     hero("Track a request", "Find a request, check its latest status, and review the dates and evidence information recorded in the prototype.")
@@ -546,35 +630,29 @@ elif page == "Delay Analysis":
             st.write(f"**Expected due:** {show_date(row['Expected Due Date'])}")
             st.write(f"**Assigned to:** {row['Assigned To'] or 'Not assigned'}")
             st.write(f"**Last updated:** {show_date(row['Last Updated'])}")
+        with right:
+            st.markdown("### Why was this flagged?")
+            for reason in result["reasons"]:
+                st.markdown(f"- {reason}")
+            st.markdown("### Recommended action")
+            for action in result["actions"]:
+                st.markdown(f"- {action}")
         with st.expander("Draft a follow-up message"):
             office = str(row["Assigned To"]).strip() or "the responsible office"
-            student = str(row["Student Name"])
-            request_id = str(row["Request ID"])
-            request_type = str(row["Request Type"])
-            submission_date = show_date(row["Submission Date"])
-            status = str(row["Status"])
-
-            draft = (
-                f"Dear {office},\n\n"
-                f"I am writing to follow up on the request submitted by "
-                f"{student}.\n\n"
-                f"Request ID: {request_id}\n"
-                f"Request Type: {request_type}\n"
-                f"Submission Date: {submission_date}\n"
-                f"Current Status: {status}\n\n"
-                f"Could you please provide an update on this request?\n\n"
-                f"Thank you."
+            due_analysis = ai_engineering.analyse_delay(
+                row["Submission Date"], row["Expected Due Date"], row["Status"]
             )
-
-            st.text_area(
-                "Review this message before sending",
-                value=draft,
-                height=220,
+            draft = ai_engineering.draft_follow_up(
+                student_name=str(row["Student Name"]),
+                request_id=str(row["Request ID"]),
+                request_type=str(row["Request Type"]),
+                submission_date=show_date(row["Submission Date"]),
+                status=str(row["Status"]),
+                days_overdue=due_analysis.get("days_overdue"),
+                faculty_name=office,
             )
-            st.caption(
-                "This is a template-generated draft. "
-                "It is not sent automatically."
-            )
+            st.text_area("Review this message before sending", value=draft, height=220)
+            st.caption("This is a template-generated draft. It is not sent automatically.")
 
 elif page == "Faculty Monitoring":
     hero("Faculty monitoring", "A central view for spotting urgent requests and routing them to the appropriate review group.")
@@ -608,16 +686,8 @@ elif page == "Faculty Monitoring":
             st.write(f"**Priority reason:** {row['Priority reason']}")
             st.write(f"**Evidence filename:** {row['Evidence File Name'] or 'No filename recorded'}")
             st.write(f"**Evidence verification:** {row['Evidence Verification'] or 'Evidence Required'}")
-            st.write(
-                "Evidence review is manual. These rule-based suggestions are not "
-                "proof of authenticity. Secure faculty authentication, a private "
-                "evidence viewer, and automatic notifications are not implemented. "
-                "Faculty must make the final decision."
-            )
-            st.info(
-                "To update a request in this prototype, use Manage Requests. "
-                "Faculty-only permissions must be implemented before deployment."
-            )
+            st.write("PDF text checks and follow-up draft generation are connected to the EchoGuard AI engineering module. These checks are rule-based suggestions, not proof of authenticity. Secure faculty authentication, a private evidence viewer, and automatic notifications are not implemented. Faculty must make the actual decision.")
+            st.info("To update a request in this prototype, use Manage Requests. Faculty-only permissions must be implemented before deployment.")
 
 elif page == "Manage Requests":
     hero("Manage requests", "Edit entries, delete test data, or import and export CSV files.")
@@ -778,7 +848,7 @@ Install the required packages with `pip install streamlit pandas`, open a termin
 It keeps request details and evidence status together, routes request categories for monitoring, highlights potential time/delay issues, and prepares follow-up message drafts for a person to review.
 
 ### Important limitations
-The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. Evidence review is manual. Follow-up messages are generated using a basic text template. These features do not use a trained AI model. Image OCR and automatic notifications are not implemented. Production deployment requires security review and end-to-end testing.
+The delay percentage is **not a validated probability** and is based on hand-written rules, not a trained or validated AI model. The faculty view is not protected by real authentication or role-based permissions. Uploaded evidence files are stored locally through the backend helper, but there is no authenticated/private evidence viewer or production-grade access control. PDF text checks and follow-up draft generation are connected to the AI engineering helper; these are rule-based suggestions and templates, not a trained AI model, proof of authenticity, or automatic approval. Image OCR and automatic notifications are not implemented. Production deployment requires security review and end-to-end testing.
 
 ### Privacy and demo guidance
 Request data is stored locally in SQLite (`echoguard.db`) and evidence uploads are stored in a local `evidence_uploads` folder. This is not a secure multi-user deployment. Use fictional records for the hackathon demonstration and do not enter sensitive student information.
