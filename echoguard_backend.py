@@ -167,6 +167,17 @@ def initialize_database() -> None:
         conn.execute("UPDATE requests SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL OR TRIM(updated_at) = ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_student ON requests(student_name)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS request_status_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            old_status TEXT NOT NULL DEFAULT '',
+            new_status TEXT NOT NULL,
+            changed_by TEXT NOT NULL DEFAULT 'System',
+            changed_role TEXT NOT NULL DEFAULT 'System',
+            note TEXT NOT NULL DEFAULT '',
+            changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_status_history_request ON request_status_history(request_id, changed_at)")
 
 
 def _text(value: Any) -> str:
@@ -215,6 +226,31 @@ def _db_row_to_record(row: sqlite3.Row) -> dict[str, str]:
     }
 
 
+def add_status_history(request_id: str, old_status: str, new_status: str,
+                       changed_by: str = "System", changed_role: str = "System",
+                       note: str = "") -> None:
+    """Append an audit entry whenever a request status changes."""
+    initialize_database()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO request_status_history(request_id, old_status, new_status, changed_by, changed_role, note) VALUES(?,?,?,?,?,?)",
+            (str(request_id), str(old_status or ""), str(new_status or ""),
+             str(changed_by or "System"), str(changed_role or "System"), str(note or "")),
+        )
+
+
+def get_status_history(request_id: str) -> pd.DataFrame:
+    """Return chronological status changes for a single request."""
+    initialize_database()
+    with _connect() as conn:
+        rows = conn.execute(
+            'SELECT changed_at AS Timestamp, old_status AS \"From\", new_status AS \"To\", changed_by AS \"By\", changed_role AS Role, note AS Note '
+            "FROM request_status_history WHERE request_id = ? ORDER BY history_id DESC",
+            (str(request_id),),
+        ).fetchall()
+    return pd.DataFrame([dict(row) for row in rows], columns=["Timestamp", "From", "To", "By", "Role", "Note"])
+
+
 def list_requests() -> pd.DataFrame:
     initialize_database()
     with _connect() as conn:
@@ -238,17 +274,22 @@ def create_request(record: Mapping[str, Any]) -> str:
     with _connect() as conn:
         try:
             conn.execute(f"INSERT INTO requests ({', '.join(keys)}) VALUES ({', '.join('?' for _ in keys)})", values)
+            conn.execute(
+                "INSERT INTO request_status_history(request_id, old_status, new_status, changed_by, changed_role, note) VALUES(?,?,?,?,?,?)",
+                (item["Request ID"], "", item["Status"], "Student", "Student", "Request submitted"),
+            )
         except sqlite3.IntegrityError as exc:
             raise BackendError(f"Request ID '{item['Request ID']}' already exists.") from exc
     return item["Request ID"]
 
 
-def update_request(request_id: str, changes: Mapping[str, Any]) -> None:
+def update_request(request_id: str, changes: Mapping[str, Any], *, changed_by: str = "System", changed_role: str = "System", note: str = "") -> None:
     existing = get_request(request_id)
     if existing is None:
         raise BackendError(f"Request '{request_id}' was not found.")
     merged = {**existing, **dict(changes), "Request ID": str(request_id)}
     item = _normalise(merged)
+    old_status = str(existing.get("Status", ""))
     db_columns = ["request_type", "submission_date", "expected_due_date", "status", "assigned_to", "last_updated", "notes", "student_name", "activity_name", "activity_date", "activity_time", "evidence_file_name", "evidence_verification", "routing_group", "faculty_notes", "college_response_date"]
     values = [item[c] for c in COLUMNS[1:]] + [datetime.now().isoformat(timespec="seconds"), str(request_id)]
     assignments = ", ".join(f"{col} = ?" for col in db_columns) + ", updated_at = ?"
@@ -256,6 +297,11 @@ def update_request(request_id: str, changes: Mapping[str, Any]) -> None:
         cur = conn.execute(f"UPDATE requests SET {assignments} WHERE request_id = ?", values)
         if cur.rowcount == 0:
             raise BackendError(f"Request '{request_id}' was not found.")
+        if old_status != item["Status"]:
+            conn.execute(
+                "INSERT INTO request_status_history(request_id, old_status, new_status, changed_by, changed_role, note) VALUES(?,?,?,?,?,?)",
+                (str(request_id), old_status, item["Status"], str(changed_by or "System"), str(changed_role or "System"), str(note or "")),
+            )
 
 
 def delete_request(request_id: str) -> bool:
@@ -265,7 +311,7 @@ def delete_request(request_id: str) -> bool:
     return cur.rowcount > 0
 
 
-def save_requests(frame: pd.DataFrame) -> None:
+def save_requests(frame: pd.DataFrame, *, changed_by: str = "System", changed_role: str = "System", note: str = "") -> None:
     """Compatibility adapter for the current Streamlit frontend's DataFrame workflow.
 
     The full set is validated before a transaction replaces SQLite records, so invalid
@@ -290,6 +336,7 @@ def save_requests(frame: pd.DataFrame) -> None:
         # with the current normalized schema where that column does not exist.
         table_columns = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
         has_payload_json = "payload_json" in table_columns
+        previous = {row["request_id"]: row["status"] for row in conn.execute("SELECT request_id, status FROM requests").fetchall()}
         insert_cols = list(db_cols)
         if has_payload_json:
             insert_cols.append("payload_json")
@@ -304,6 +351,21 @@ def save_requests(frame: pd.DataFrame) -> None:
         conn.execute("DELETE FROM requests")
         if values:
             conn.executemany(sql, values)
+        # Preserve a durable status timeline across the frontend's DataFrame save workflow.
+        for record in records:
+            request_id = record["Request ID"]
+            old_status = previous.get(request_id)
+            new_status = record["Status"]
+            if old_status is None:
+                conn.execute(
+                    "INSERT INTO request_status_history(request_id, old_status, new_status, changed_by, changed_role, note) VALUES(?,?,?,?,?,?)",
+                    (request_id, "", new_status, str(changed_by or "System"), str(changed_role or "System"), str(note or "Request created/imported")),
+                )
+            elif old_status != new_status:
+                conn.execute(
+                    "INSERT INTO request_status_history(request_id, old_status, new_status, changed_by, changed_role, note) VALUES(?,?,?,?,?,?)",
+                    (request_id, old_status, new_status, str(changed_by or "System"), str(changed_role or "System"), str(note or "Status updated")),
+                )
 
 
 def load_requests() -> pd.DataFrame:
