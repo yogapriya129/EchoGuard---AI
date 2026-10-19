@@ -72,13 +72,14 @@ def load_data():
                 df[c] = ""
         df = df[COLUMNS]
         date_cols = ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]
+        # Keep dates as ISO strings in the DataFrame. pandas 3.x may infer
+        # datetime64 from mixed date/blank values, which rejects Python date
+        # assignments later in edit/review forms and can leak NaT into display.
         for c in date_cols:
-            df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
-        for c in COLUMNS:
-            df[c] = df[c].fillna("")
+            df[c] = pd.to_datetime(df[c], errors="coerce").dt.strftime("%Y-%m-%d").fillna("").astype(object)
         for c in COLUMNS:
             if c not in date_cols:
-                df[c] = df[c].astype(str)
+                df[c] = df[c].fillna("").astype(str)
         for i, row in df.iterrows():
             if not row["Routing Group"]:
                 df.at[i, "Routing Group"] = routing_group(row["Request Type"])
@@ -540,6 +541,9 @@ elif page == "Add Request":
             st.error("Please upload supporting evidence for this OD request.")
         else:
             current = st.session_state.requests_df.copy()
+            for date_col in ["Submission Date", "Expected Due Date", "Last Updated", "Activity Date", "College Response Date"]:
+                if date_col in current.columns:
+                    current[date_col] = current[date_col].astype(object)
             evidence_status = "Pending Verification" if evidence_file else ("Evidence Required" if is_od else "Not Required")
             new_row = {"Request ID": next_id(current), "Request Type": req_type,
                        "Submission Date": submitted_date, "Expected Due Date": due_date,
