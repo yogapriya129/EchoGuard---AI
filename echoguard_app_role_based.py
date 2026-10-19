@@ -123,11 +123,16 @@ def next_id(df):
 
 
 def to_date(value):
-    """Convert messy CSV/SQLite date values safely; treat NaN/NaT as missing."""
+    """Return a real datetime.date or None; never pass pandas NaT onward."""
     if value is None:
         return None
+    # Check pandas missing sentinels BEFORE date/datetime type checks. In some
+    # pandas versions NaT behaves like a datetime-like object but strftime fails.
     try:
-        if pd.isna(value):
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+        if not isinstance(missing, (list, tuple)) and bool(missing):
             return None
     except (TypeError, ValueError):
         pass
@@ -137,6 +142,9 @@ def to_date(value):
         return value.date()
     if isinstance(value, datetime):
         return value.date()
+    # Do not accept NaTType merely because some pandas versions treat it as date-like.
+    if type(value).__name__ == "NaTType":
+        return None
     if isinstance(value, date):
         return value
     try:
@@ -144,13 +152,19 @@ def to_date(value):
         if pd.isna(parsed):
             return None
         return parsed.date()
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError, AttributeError):
         return None
 
 
 def show_date(value):
     d = to_date(value)
-    return d.strftime("%d %b %Y") if d is not None else "Not entered"
+    # Extra guard for NaT-like values in legacy/corrupted rows.
+    if d is None or type(d).__name__ == "NaTType":
+        return "Not entered"
+    try:
+        return d.strftime("%d %b %Y")
+    except (TypeError, ValueError, AttributeError):
+        return "Not entered"
 
 
 def routing_group(request_type):
